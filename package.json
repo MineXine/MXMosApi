@@ -1,0 +1,24 @@
+{
+  "name": "shuoshuo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "说说系统 - TypeScript REST API + Nuxt 4 前端 + MongoDB",
+  "scripts": {
+    "install:all": "npm --prefix server install && npm --prefix web install",
+    "dev": "concurrently -n api,web -c cyan,magenta \"npm --prefix server run dev\" \"npm --prefix web run dev\"",
+    "dev:api": "npm --prefix server run dev",
+    "dev:web": "npm --prefix web run dev",
+    "build": "npm --prefix server run build && npm --prefix web run build",
+    "typecheck": "npm --prefix server run typecheck && npm --prefix web run typecheck",
+    "typecheck:scripts": "npm --prefix server run typecheck:scripts && npm --prefix web run typecheck:scripts",
+    "test": "npm --prefix server run smoke && npm --prefix web run test:render",
+    "e2e": "npm --prefix server run e2e",
+    "test:ui": "npm --prefix web run test:ui"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
