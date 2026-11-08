@@ -11,7 +11,8 @@
     "build": "npm --prefix server run build && npm --prefix web run build",
     "typecheck": "npm --prefix server run typecheck && npm --prefix web run typecheck",
     "typecheck:scripts": "npm --prefix server run typecheck:scripts && npm --prefix web run typecheck:scripts",
-    "test": "npm --prefix server run smoke && npm --prefix web run test:render",
+    "test": "npm --prefix server run smoke && npm --prefix server run test:openapi && npm --prefix web run test:render",
+    "test:openapi": "npm --prefix server run test:openapi",
     "e2e": "npm --prefix server run e2e",
     "test:ui": "npm --prefix web run test:ui"
   },
