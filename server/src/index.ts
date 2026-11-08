@@ -3,7 +3,7 @@ import cors from 'cors';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { env } from './config/env.js';
-import { attachUser } from './middleware/auth.js';
+import { attachApiToken, attachUser } from './middleware/auth.js';
 import { errorHandler, notFoundHandler } from './middleware/error.js';
 import { createApiRouter, setRepository } from './routes/index.js';
 import { closeRepository, getRepository, initRepository } from './repositories/index.js';
@@ -40,6 +40,7 @@ export async function createApp() {
 
   // 解析登录态
   app.use(attachUser);
+  app.use(attachApiToken);
 
   app.use('/api', createApiRouter());
 
