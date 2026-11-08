@@ -13,6 +13,7 @@
     "typecheck:scripts": "tsc -p tsconfig.scripts.json",
     "seed": "tsx scripts/seed.ts",
     "smoke": "tsx scripts/smoke.ts",
+    "test:openapi": "tsx scripts/openapi-test.ts",
     "e2e": "tsx scripts/e2e.ts"
   },
   "dependencies": {
