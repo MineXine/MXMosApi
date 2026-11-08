@@ -1,11 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import type {
+  ApiToken,
   Attachment,
   CalendarCell,
   DashboardStats,
   Draft,
   MapPoint,
   MediaAsset,
+  NoticeConfig,
+  NoticeType,
   Post,
   PostQuery,
   Paged,
@@ -40,6 +43,8 @@ export class MemoryRepository implements Repository {
   private views = new Map<string, SavedView>();
   private drafts = new Map<string, Draft>();
   private medias = new Map<string, MediaAsset>();
+  private apiTokens = new Map<string, ApiToken>();
+  private notices = new Map<string, NoticeConfig>();
 
   async connect(): Promise<void> {
     /* 内存驱动无需连接 */
@@ -94,6 +99,13 @@ export class MemoryRepository implements Repository {
     return this.publicUser(u);
   }
 
+  async updateUserPassword(id: string, passwordHash: string): Promise<boolean> {
+    const u = this.users.get(id);
+    if (!u) return false;
+    u.passwordHash = passwordHash;
+    return true;
+  }
+
   async listUsers(): Promise<User[]> {
     return [...this.users.values()].map((u) => this.publicUser(u));
   }
@@ -146,6 +158,11 @@ export class MemoryRepository implements Repository {
     if (patch.plainText !== undefined) row.plainText = patch.plainText;
     if (patch.tags !== undefined) row.tags = patch.tags;
     if (patch.visibility !== undefined) row.visibility = patch.visibility;
+    if (patch.status !== undefined) {
+      row.status = patch.status;
+      // 进入封存态时打时间戳，离开时清掉
+      row.archivedAt = patch.status === 'archived' ? isoNow() : null;
+    }
     if (patch.location !== undefined) row.location = patch.location;
     if (patch.attachments !== undefined) row.attachments = patch.attachments;
     if (patch.mdcOptions !== undefined) row.mdcOptions = patch.mdcOptions;
@@ -500,6 +517,151 @@ export class MemoryRepository implements Repository {
     return [...this.posts.values()].filter(
       (r) => ownerIds.includes(r.authorId) && r.tags.includes(tag) && r.status === 'published',
     ).length;
+  }
+
+  // ---------------- 标签管理 ----------------
+  async renameTag(ownerIds: string[], from: string, to: string): Promise<number> {
+    let n = 0;
+    for (const row of this.posts.values()) {
+      if (!ownerIds.includes(row.authorId)) continue;
+      const idx = row.tags.indexOf(from);
+      if (idx < 0) continue;
+      // 若新名已存在则去重，否则原位替换
+      if (row.tags.includes(to)) {
+        row.tags.splice(idx, 1);
+      } else {
+        row.tags[idx] = to;
+      }
+      row.searchTokens = queryTokens([row.plainText, ...row.tags].join(' '));
+      n += 1;
+    }
+    return n;
+  }
+
+  async removeTag(ownerIds: string[], name: string): Promise<number> {
+    let n = 0;
+    for (const row of this.posts.values()) {
+      if (!ownerIds.includes(row.authorId)) continue;
+      const idx = row.tags.indexOf(name);
+      if (idx < 0) continue;
+      row.tags.splice(idx, 1);
+      row.searchTokens = queryTokens([row.plainText, ...row.tags].join(' '));
+      n += 1;
+    }
+    return n;
+  }
+
+  // ---------------- API 令牌 ----------------
+  async createApiToken(input: {
+    ownerId: string;
+    name: string;
+    token: string;
+    prefix: string;
+    scopes: string[];
+    expiresAt: string | null;
+  }): Promise<ApiToken> {
+    const now = isoNow();
+    const row: ApiToken = {
+      id: randomUUID(),
+      ownerId: input.ownerId,
+      name: input.name,
+      token: input.token,
+      prefix: input.prefix,
+      enabled: true,
+      scopes: input.scopes,
+      lastUsedAt: null,
+      expiresAt: input.expiresAt,
+      createdAt: now,
+    };
+    this.apiTokens.set(row.id, row);
+    return row;
+  }
+
+  async findApiTokenByHash(tokenHash: string): Promise<ApiToken | null> {
+    for (const row of this.apiTokens.values()) {
+      if (row.token === tokenHash) return row;
+    }
+    return null;
+  }
+
+  async listApiTokens(ownerId: string): Promise<ApiToken[]> {
+    return [...this.apiTokens.values()]
+      .filter((r) => r.ownerId === ownerId)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  async updateApiToken(
+    id: string,
+    patch: Partial<Pick<ApiToken, 'name' | 'enabled' | 'scopes' | 'expiresAt'>>,
+  ): Promise<ApiToken | null> {
+    const row = this.apiTokens.get(id);
+    if (!row) return null;
+    Object.assign(row, patch);
+    return row;
+  }
+
+  async deleteApiToken(id: string): Promise<boolean> {
+    return this.apiTokens.delete(id);
+  }
+
+  async touchApiToken(id: string): Promise<void> {
+    const row = this.apiTokens.get(id);
+    if (row) row.lastUsedAt = isoNow();
+  }
+
+  // ---------------- 通知渠道 ----------------
+  async createNotice(input: {
+    ownerId: string;
+    type: NoticeType;
+    token: string;
+    title: string;
+    enabled: boolean;
+    onPostCreate: boolean;
+  }): Promise<NoticeConfig> {
+    const row: NoticeConfig = {
+      id: randomUUID(),
+      ownerId: input.ownerId,
+      type: input.type,
+      token: input.token,
+      title: input.title,
+      enabled: input.enabled,
+      onPostCreate: input.onPostCreate,
+      lastSentAt: null,
+      createdAt: isoNow(),
+    };
+    this.notices.set(row.id, row);
+    return row;
+  }
+
+  async listNotices(ownerId: string): Promise<NoticeConfig[]> {
+    return [...this.notices.values()]
+      .filter((r) => r.ownerId === ownerId)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  async updateNotice(
+    id: string,
+    patch: Partial<Pick<NoticeConfig, 'type' | 'token' | 'title' | 'enabled' | 'onPostCreate'>>,
+  ): Promise<NoticeConfig | null> {
+    const row = this.notices.get(id);
+    if (!row) return null;
+    Object.assign(row, patch);
+    return row;
+  }
+
+  async deleteNotice(id: string): Promise<boolean> {
+    return this.notices.delete(id);
+  }
+
+  async touchNotice(id: string): Promise<void> {
+    const row = this.notices.get(id);
+    if (row) row.lastSentAt = isoNow();
+  }
+
+  async listActiveNotices(ownerId: string): Promise<NoticeConfig[]> {
+    return [...this.notices.values()].filter(
+      (r) => r.ownerId === ownerId && r.enabled && r.onPostCreate,
+    );
   }
 }
 
