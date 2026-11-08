@@ -32,7 +32,12 @@ const PostSchema = new Schema(
     },
     tags: { type: [String], default: [], index: true },
     visibility: { type: String, enum: ['public', 'private'], default: 'public', index: true },
-    status: { type: String, enum: ['published', 'archived'], default: 'published', index: true },
+    status: {
+      type: String,
+      enum: ['published', 'archived', 'hidden'],
+      default: 'published',
+      index: true,
+    },
     archivedAt: { type: String, default: null },
     location: {
       type: new Schema(
@@ -167,6 +172,54 @@ const MediaSchema = new Schema(
   { timestamps: true, collection: 'medias' },
 );
 
+/**
+ * API 访问令牌。
+ * `token` 存哈希（明文仅创建时返回一次），`prefix` 存明文前缀用于列表识别。
+ */
+const ApiTokenSchema = new Schema(
+  {
+    ownerId: { type: String, required: true, index: true },
+    name: { type: String, required: true },
+    token: { type: String, required: true, index: true },
+    prefix: { type: String, default: '' },
+    enabled: { type: Boolean, default: true },
+    scopes: { type: [String], default: [] },
+    lastUsedAt: { type: String, default: null },
+    expiresAt: { type: String, default: null },
+  },
+  { timestamps: true, collection: 'apiTokens' },
+);
+
+/** 第三方推送通知渠道 */
+const NoticeSchema = new Schema(
+  {
+    ownerId: { type: String, required: true, index: true },
+    type: {
+      type: String,
+      enum: [
+        'telegram',
+        'wecom',
+        'dingtalk',
+        'bark',
+        'pushplus',
+        'pushdeer',
+        'serverchan',
+        'igot',
+        'qmsg',
+        'gocqhttp',
+        'webhook',
+      ],
+      required: true,
+    },
+    token: { type: String, required: true },
+    title: { type: String, default: '' },
+    enabled: { type: Boolean, default: true },
+    onPostCreate: { type: Boolean, default: true },
+    lastSentAt: { type: String, default: null },
+  },
+  { timestamps: true, collection: 'notices' },
+);
+
 export const UserModel = mongoose.model('User', UserSchema);
 export const PostModel = mongoose.model('Post', PostSchema);
 export const ReactionModel = mongoose.model('Reaction', ReactionSchema);
@@ -174,3 +227,5 @@ export const ShareModel = mongoose.model('Share', ShareSchema);
 export const ViewModel = mongoose.model('View', ViewSchema);
 export const DraftModel = mongoose.model('Draft', DraftSchema);
 export const MediaModel = mongoose.model('Media', MediaSchema);
+export const ApiTokenModel = mongoose.model('ApiToken', ApiTokenSchema);
+export const NoticeModel = mongoose.model('Notice', NoticeSchema);
