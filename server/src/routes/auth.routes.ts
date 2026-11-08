@@ -80,6 +80,32 @@ authRouter.patch('/me', requireAuth, validateBody(profileSchema), async (req, re
   res.json({ ok: true, data: { user } });
 });
 
+/**
+ * 修改密码。
+ * 需提供旧密码校验，成功后更新哈希；JWT 本身不过期，故不主动登出其他会话。
+ */
+const passwordSchema = z.object({
+  oldPassword: z.string().min(1).max(72),
+  newPassword: z.string().min(6).max(72),
+});
+
+authRouter.patch('/password', requireAuth, validateBody(passwordSchema), async (req, res) => {
+  const { oldPassword, newPassword } = req.body as z.infer<typeof passwordSchema>;
+  const repo = getRepository();
+
+  const user = await repo.findUserByUsername((req.user as { username: string }).username);
+  if (!user) throw notFound('用户不存在');
+
+  const ok = await bcrypt.compare(oldPassword, user.passwordHash);
+  if (!ok) throw unauthorized('旧密码不正确');
+
+  const passwordHash = await bcrypt.hash(newPassword, 10);
+  const done = await repo.updateUserPassword(user.id, passwordHash);
+  if (!done) throw notFound('用户不存在');
+
+  res.json({ ok: true, data: { updated: true } });
+});
+
 /** 用户列表（用于切换体验账号） */
 authRouter.get('/users', async (_req, res) => {
   const repo = getRepository();
