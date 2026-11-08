@@ -1,10 +1,13 @@
 import type {
+  ApiToken,
   Attachment,
   CalendarCell,
   DashboardStats,
   Draft,
   MapPoint,
   MediaAsset,
+  NoticeConfig,
+  NoticeType,
   Post,
   PostQuery,
   Paged,
@@ -32,6 +35,8 @@ export interface UpdatePostInput {
   plainText?: string;
   tags?: string[];
   visibility?: Post['visibility'];
+  /** 状态流转：published / archived / hidden */
+  status?: Post['status'];
   location?: Post['location'];
   attachments?: Attachment[];
   mdcOptions?: Post['mdcOptions'];
@@ -61,6 +66,8 @@ export interface Repository {
     id: string,
     patch: Partial<Pick<User, 'displayName' | 'bio' | 'avatarColor'>>,
   ): Promise<User | null>;
+  /** 修改密码（仅更新哈希，用于「修改密码」能力） */
+  updateUserPassword(id: string, passwordHash: string): Promise<boolean>;
   listUsers(): Promise<User[]>;
 
   // ---- 说说 ----
@@ -122,4 +129,49 @@ export interface Repository {
   mapPoints(query: PostQuery): Promise<MapPoint[]>;
   dashboardStats(ownerIds: string[]): Promise<DashboardStats>;
   countByTag(ownerIds: string[], tag: string): Promise<number>;
+
+  // ---- 标签管理 ----
+  /** 重命名标签（把所有说说里的旧名换成新名） */
+  renameTag(ownerIds: string[], from: string, to: string): Promise<number>;
+  /** 删除标签（从所有说说中摘除，不影响说说本身） */
+  removeTag(ownerIds: string[], name: string): Promise<number>;
+
+  // ---- API 令牌 ----
+  createApiToken(input: {
+    ownerId: string;
+    name: string;
+    token: string;
+    prefix: string;
+    scopes: string[];
+    expiresAt: string | null;
+  }): Promise<ApiToken>;
+  findApiTokenByHash(tokenHash: string): Promise<ApiToken | null>;
+  listApiTokens(ownerId: string): Promise<ApiToken[]>;
+  updateApiToken(
+    id: string,
+    patch: Partial<Pick<ApiToken, 'name' | 'enabled' | 'scopes' | 'expiresAt'>>,
+  ): Promise<ApiToken | null>;
+  deleteApiToken(id: string): Promise<boolean>;
+  /** 记录 token 最近使用（用于审计） */
+  touchApiToken(id: string): Promise<void>;
+
+  // ---- 通知渠道 ----
+  createNotice(input: {
+    ownerId: string;
+    type: NoticeType;
+    token: string;
+    title: string;
+    enabled: boolean;
+    onPostCreate: boolean;
+  }): Promise<NoticeConfig>;
+  listNotices(ownerId: string): Promise<NoticeConfig[]>;
+  updateNotice(
+    id: string,
+    patch: Partial<Pick<NoticeConfig, 'type' | 'token' | 'title' | 'enabled' | 'onPostCreate'>>,
+  ): Promise<NoticeConfig | null>;
+  deleteNotice(id: string): Promise<boolean>;
+  /** 记录推送时间 */
+  touchNotice(id: string): Promise<void>;
+  /** 取出「说说创建时需推送」的渠道 */
+  listActiveNotices(ownerId: string): Promise<NoticeConfig[]>;
 }
