@@ -1,14 +1,15 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { nanoid } from 'nanoid';
-import type { PostQuery } from '../../../shared/types.js';
+import type { PostQuery, PostStatus } from '../../../shared/types.js';
 import { ALLOWED_MDC, MDC_DEFAULTS, parseMdcOptions } from '../../../shared/mdc.js';
 import { repo } from './filters.js';
-import { requireAuth } from '../middleware/auth.js';
+import { requireApiToken, requireAuth } from '../middleware/auth.js';
 import { validateBody, validateQuery, getValidatedQuery } from '../middleware/error.js';
-import { forbidden, notFound } from '../lib/errors.js';
+import { badRequest, forbidden, notFound } from '../lib/errors.js';
 import { extractTags, toPlainText, tokenize } from '../lib/tokenize.js';
 import { parseDevice } from '../lib/device.js';
+import { sendNoticeAll } from '../lib/notice.js';
 import { param } from '../lib/params.js';
 
 export const postsRouter = Router();
@@ -62,7 +63,7 @@ const listQuerySchema = z.object({
   page: z.coerce.number().int().min(1).optional().default(1),
   pageSize: z.coerce.number().int().min(1).max(100).optional().default(20),
   visibility: z.enum(['public', 'private', 'all']).optional().default('all'),
-  status: z.enum(['published', 'archived']).optional().default('published'),
+  status: z.enum(['published', 'archived', 'hidden']).optional().default('published'),
   keyword: z.string().max(120).optional(),
   tags: z.string().optional(),
   from: z.string().optional(),
@@ -81,6 +82,57 @@ const listQuerySchema = z.object({
 /* ------------------------------------------------------------------ *
  * 路由
  * ------------------------------------------------------------------ */
+
+/**
+ * 从请求体构造说说（供 JWT 登录态与 API Token 开放发布共用）。
+ * 抽出来避免两条路径的解析逻辑漂移。
+ */
+async function buildAndCreate(
+  body: z.infer<typeof createPostSchema>,
+  authorId: string,
+  ua: string | undefined,
+) {
+  const r = repo();
+  const plainText = toPlainText(body.content);
+  const tags = body.tags?.length
+    ? body.tags.map((t) => t.toLowerCase())
+    : extractTags(body.content, plainText);
+  const mdcOptions = parseMdcOptions(body.content, MDC_DEFAULTS);
+
+  return r.createPost({
+    authorId,
+    content: body.content,
+    plainText,
+    tags: [...new Set(tags)],
+    visibility: body.visibility ?? 'public',
+    location: body.location ?? null,
+    attachments: body.attachments ?? [],
+    device: parseDevice(ua),
+    mdcOptions,
+    searchTokens: tokenize(`${body.content} ${plainText} ${tags.join(' ')}`),
+  });
+}
+
+/**
+ * 新建说说后异步推送通知（不阻塞响应、失败不影响写入）。
+ */
+function fireNoticeOnCreate(authorId: string, post: { plainText: string; id: string }): void {
+  void (async () => {
+    try {
+      const channels = await repo().listActiveNotices(authorId);
+      if (!channels.length) return;
+      const excerpt = post.plainText.slice(0, 200) || '（无文本内容）';
+      await sendNoticeAll(channels, {
+        title: '新说说',
+        content: excerpt,
+        url: `/post/${post.id}`,
+      });
+      for (const c of channels) await repo().touchNotice(c.id);
+    } catch {
+      /* 推送失败不影响主流程 */
+    }
+  })();
+}
 
 /** 说说列表（时间线 / 搜索 / 标签 / 视图 统一入口） */
 postsRouter.get('/', validateQuery(listQuerySchema), async (req, res) => {
@@ -120,25 +172,22 @@ postsRouter.get('/', validateQuery(listQuerySchema), async (req, res) => {
 /** 创建说说 */
 postsRouter.post('/', requireAuth, validateBody(createPostSchema), async (req, res) => {
   const body = req.body as z.infer<typeof createPostSchema>;
-  const r = repo();
+  const post = await buildAndCreate(body, req.user!.sub, req.headers['user-agent']);
+  fireNoticeOnCreate(req.user!.sub, post);
+  res.status(201).json({ ok: true, data: { post } });
+});
 
-  const plainText = toPlainText(body.content);
-  const tags = body.tags?.length ? body.tags.map((t) => t.toLowerCase()) : extractTags(body.content, plainText);
-  const mdcOptions = parseMdcOptions(body.content, MDC_DEFAULTS);
-
-  const post = await r.createPost({
-    authorId: req.user!.sub,
-    content: body.content,
-    plainText,
-    tags: [...new Set(tags)],
-    visibility: body.visibility ?? 'public',
-    location: body.location ?? null,
-    attachments: body.attachments ?? [],
-    device: parseDevice(req.headers['user-agent']),
-    mdcOptions,
-    searchTokens: tokenize(`${body.content} ${plainText} ${tags.join(' ')}`),
-  });
-
+/**
+ * 开放发布 —— 用 API Token 发布说说（供小程序 / CLI / 自动化脚本调用）。
+ *
+ * 鉴权走 `X-API-Token` 头（或 `Authorization: ApiToken <token>`），
+ * 与后台界面的 JWT 会话解耦；令牌归属的用户即作者。
+ */
+postsRouter.post('/by-token', requireApiToken, validateBody(createPostSchema), async (req, res) => {
+  const body = req.body as z.infer<typeof createPostSchema>;
+  const authorId = req.apiToken!.ownerId;
+  const post = await buildAndCreate(body, authorId, req.headers['user-agent']);
+  fireNoticeOnCreate(authorId, post);
   res.status(201).json({ ok: true, data: { post } });
 });
 
@@ -146,6 +195,39 @@ postsRouter.post('/', requireAuth, validateBody(createPostSchema), async (req, r
 postsRouter.get('/tags/list', async (_req, res) => {
   const tags = await repo().listTags();
   res.json({ ok: true, data: { tags } });
+});
+
+/**
+ * 标签改名 / 合并。
+ * 语义：把作者所有说说里的 `from` 替换成 `to`；`to` 已存在时自动去重。
+ * 用于把同义标签归一（如「前端」「web」→「开发」）。
+ */
+const renameTagSchema = z.object({
+  from: z.string().min(1).max(32),
+  to: z.string().min(1).max(32),
+});
+
+postsRouter.post('/tags/rename', requireAuth, validateBody(renameTagSchema), async (req, res) => {
+  const { from, to } = req.body as z.infer<typeof renameTagSchema>;
+  if (from === to) throw badRequest('新旧标签名不能相同');
+
+  const r = repo();
+  const ownerId = req.user!.sub;
+  const count = await r.renameTag([ownerId], from, to);
+  const tags = await r.listTags([ownerId]);
+  res.json({ ok: true, data: { renamed: count, tags } });
+});
+
+/**
+ * 删除标签 —— 从作者所有说说中摘除该标签，说说本身不受影响。
+ */
+postsRouter.delete('/tags/:name', requireAuth, async (req, res) => {
+  const name = param(req, 'name').toLowerCase();
+  const r = repo();
+  const ownerId = req.user!.sub;
+  const count = await r.removeTag([ownerId], name);
+  const tags = await r.listTags([ownerId]);
+  res.json({ ok: true, data: { removed: count, tags } });
 });
 
 /** 日历视图数据 */
@@ -250,12 +332,12 @@ postsRouter.delete('/:id', requireAuth, async (req, res) => {
   res.json({ ok: true, data: { deleted: true } });
 });
 
-/** 归档 */
+/** 封存 */
 postsRouter.post('/:id/archive', requireAuth, async (req, res) => {
   const r = repo();
   const existing = await r.findPostById(param(req, 'id'));
   if (!existing) throw notFound('说说不存在');
-  if (existing.authorId !== req.user!.sub) throw forbidden('只能归档自己的说说');
+  if (existing.authorId !== req.user!.sub) throw forbidden('只能封存自己的说说');
   const post = await r.setArchived(param(req, 'id'), true);
   res.json({ ok: true, data: { post } });
 });
@@ -267,6 +349,29 @@ postsRouter.post('/:id/unarchive', requireAuth, async (req, res) => {
   if (!existing) throw notFound('说说不存在');
   if (existing.authorId !== req.user!.sub) throw forbidden('只能恢复自己的说说');
   const post = await r.setArchived(param(req, 'id'), false);
+  res.json({ ok: true, data: { post } });
+});
+
+/**
+ * 状态流转 —— 在 published / archived / hidden 之间直接切换。
+ *
+ * - published 正常显示
+ * - archived  封存（从默认列表移出）
+ * - hidden    隐藏（仅作者可见，等同自用草稿箱）
+ */
+const statusSchema = z.object({ status: z.enum(['published', 'archived', 'hidden']) });
+
+postsRouter.patch('/:id/status', requireAuth, validateBody(statusSchema), async (req, res) => {
+  const { status } = req.body as z.infer<typeof statusSchema>;
+  const r = repo();
+  const id = param(req, 'id');
+
+  const existing = await r.findPostById(id);
+  if (!existing) throw notFound('说说不存在');
+  if (existing.authorId !== req.user!.sub) throw forbidden('只能改自己的说说状态');
+
+  // archived 走专用的封存接口，此处用 updatePost 直改状态字段
+  const post = await r.updatePost(id, { status } as { status: PostStatus });
   res.json({ ok: true, data: { post } });
 });
 
